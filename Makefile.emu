@@ -1,0 +1,175 @@
+# Allow to run kernel on different emulators with different prebuilt rootfs
+
+# Rootfs preparation
+hda:
+	$(Q)(cd $(ROOTFS_DIR); make $@)
+
+flp:
+	$(Q)(cd $(ROOTFS_DIR); make $@)
+
+ramfs:
+	$(Q)(cd $(ROOTFS_DIR); make $@)
+
+hda-install:
+	$(Q)(cd $(ROOTFS_DIR); make $@)
+
+hd-install: hda-install
+
+flp-install:
+	$(Q)(cd $(ROOTFS_DIR); make $@)
+
+fd-install: flp-install
+
+ramfs-install:
+	$(Q)(cd $(ROOTFS_DIR); make $@)
+
+hda-mount:
+	$(Q)(cd $(ROOTFS_DIR); make $@)
+
+hda-umount:
+	$(Q)(cd $(ROOTFS_DIR); make $@)
+
+hd-mount: hda-mount
+hd-umount: hda-umount
+
+# VM (Qemu/Bochs) Setting for different rootfs
+
+ROOT_RAM = 0000
+ROOT_FDB = 021d
+ROOT_HDA = 0301
+
+SETROOTDEV_CMD = $(SETROOTDEV) $(LINUX_IMAGE)
+SETROOTDEV_CMD_RAM = $(SETROOTDEV_CMD) $(ROOT_RAM) $(ROOTFS_DIR)/$(RAM_IMG)
+SETROOTDEV_CMD_FDB = $(SETROOTDEV_CMD) $(ROOT_FDB)
+SETROOTDEV_CMD_HDA = $(SETROOTDEV_CMD) $(ROOT_HDA)
+
+_QEMU_CMD = $(QEMU) -m 16M -boot c
+QEMU_CMD = $(QEMU) -m 16M -boot a -fda $(LINUX_IMAGE)
+ifeq ($(QEMU_PREBUILT),1)
+  QEMU_STATUS = $(shell $(QEMU_PATH)/$(QEMU) --help >/dev/null 2>&1; echo $$?)
+  ifeq ($(QEMU_STATUS), 0)
+    QEMU_CMD := $(QEMU_PATH)/$(QEMU_CMD) $(QEMU_OPTS) -L $(QEMU_PATH)
+  endif
+endif
+QEMU_CMD_FDB = $(QEMU_CMD) -fdb $(ROOTFS_DIR)/$(FLP_IMG)
+QEMU_CMD_HDA = $(QEMU_CMD) -hda $(ROOTFS_DIR)/$(HDA_IMG)
+_QEMU_CMD_HDA = $(_QEMU_CMD) -hda $(ROOTFS_DIR)/$(HDA_IMG)
+nullstring :=
+QEMU_DBG = $(nullstring) -s -S #-nographic #-serial '/dev/ttyS0'"
+
+BOCHS_CFG = $(TOOL_DIR)/bochs/bochsrc/
+BOCHS_CMD = $(BOCHS) -q -f $(BOCHS_CFG)/bochsrc-fda.bxrc
+BOCHS_CMD_FDB = $(BOCHS) -q -f $(BOCHS_CFG)/bochsrc-fdb.bxrc
+BOCHS_CMD_HDA = $(BOCHS) -q -f $(BOCHS_CFG)/bochsrc-hd.bxrc
+BOCHS_DBG = .dbg
+
+ifneq ($(VM),)
+  NEW_VM = $(VM)
+else
+  VM ?= $(shell cat $(VM_CFG) 2>/dev/null)
+
+  ifeq ($(VM), bochs)
+    NEW_VM=qemu
+  else
+    NEW_VM=bochs
+  endif
+endif
+
+switch:
+	$(Q)echo "Switch to use emulator: $(NEW_VM)"
+	$(Q)echo $(NEW_VM) > $(VM_CFG)
+
+VM=$(shell cat $(VM_CFG) 2>/dev/null)
+
+ifeq ($(VM), bochs)
+  VM_CMD = $(BOCHS_CMD)
+  VM_CMD_FDB = $(BOCHS_CMD_FDB)
+  VM_CMD_HDA = $(BOCHS_CMD_HDA)
+  VM_DBG = $(BOCHS_DBG)
+else
+  VM_CMD = $(QEMU_CMD)
+  VM_CMD_FDB = $(QEMU_CMD_FDB)
+  VM_CMD_HDA = $(QEMU_CMD_HDA)
+  _VM_CMD_HDA = $(_QEMU_CMD_HDA)
+  VM_DBG = $(QEMU_DBG)
+endif
+
+# Allow to use curses based console via ssh
+VM_DISPLAY =
+ifeq ($(G),0)
+  ifeq ($(VM), bochs)
+    VM_DISPLAY = .term
+  else
+    VM_DISPLAY = $(nullstring) -curses
+  endif
+endif
+
+# Running on emulators with differrent rootfs
+
+ramdisk-boot: ramfs
+	@# Force init/main.o build with ramdisk support
+	$(Q)(cd $(LINUX_SRC); make -B init/main.o -B kernel/blk_drv/ramdisk.o \
+		RAMDISK_SIZE=$(RAMDISK_SIZE) RAMDISK_START=$(RAMDISK_START))
+
+# Boot with Image and Rootfs from harddisk
+hd-boot: hd-start
+
+# Boot with rootfs from ramfs, floppy and hardisk
+boot-hd: start-hd
+boot-fd: start-fd
+boot: start
+_boot: _start
+
+start: ramdisk-boot Image
+	$(SETROOTDEV_CMD_RAM)
+	$(VM_CMD)$(VM_DISPLAY)
+
+start-fd: Image flp
+	$(SETROOTDEV_CMD_FDB)
+	$(VM_CMD_FDB)$(VM_DISPLAY)
+
+start-hd: Image hda hda-install
+	$(SETROOTDEV_CMD_HDA)
+	$(VM_CMD_HDA)$(VM_DISPLAY)
+
+hd-start: Image hda hda-install
+	$(_VM_CMD_HDA)$(VM_DISPLAY)
+
+# For any other images
+_start:
+	$(VM_CMD)$(VM_DISPLAY)
+
+# see examples/linux-0.11/README.md
+LINUX_000 ?= $(ROOTFS_DIR)/_hda/usr/root/examples/linux-0.00/Image
+linux-0.00:
+	$(Q)(cd $(ROOTFS_DIR); make hda-mount)
+	$(Q)sudo make _start LINUX_IMAGE=$(LINUX_000)
+	$(Q)(cd $(ROOTFS_DIR); make hda-umount)
+
+# Debugging the above targets
+
+GDB_CMD ?= gdb --quiet $(DST)
+XTERM_CMD ?= $(Q)lxterminal --working-directory=$(TOP_DIR) -t "$(GDB_CMD)" -e "$(GDB_CMD)"
+
+gdbinit:
+	$(Q)echo "add-auto-load-safe-path $(TOP_DIR)/.gdbinit" > $(HOME)/.gdbinit
+ifeq ($(findstring kernel,$(DST)),kernel)
+	$(Q)cp .kernel_gdbinit .gdbinit
+else
+	$(Q)cp .boot_gdbinit .gdbinit
+endif
+
+debug: ramdisk-boot Image gdbinit
+	$(SETROOTDEV_CMD_RAM)
+	$(XTERM_CMD) &
+	$(VM_CMD)$(VM_DBG)$(VM_DISPLAY)
+
+debug-fd: Image flp gdbinit
+	$(SETROOTDEV_CMD_FDB)
+	$(XTERM_CMD) &
+	$(VM_CMD_FDB)$(VM_DBG)$(VM_DISPLAY)
+
+debug-hd: Image hda gdbinit
+	$(SETROOTDEV_CMD_HDA)
+	$(XTERM_CMD) &
+	$(VM_CMD_HDA)$(VM_DBG)$(VM_DISPLAY)
